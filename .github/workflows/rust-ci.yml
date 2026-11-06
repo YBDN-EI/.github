@@ -1,0 +1,141 @@
+# Shared checks of one Rust crate: format, Clippy, docs, tests on stable and a
+# `cargo check` on the MSRV. Called from each repository's ci.yml with
+# `secrets: inherit`; repository-specific jobs (fuzz, oracle, semver, ...) stay
+# in the caller.
+name: Rust CI
+
+on:
+  workflow_call:
+    inputs:
+      msrv:
+        description: Minimum supported Rust version, e.g. "1.85"
+        type: string
+        required: true
+      feature-sets:
+        description: JSON list of cargo feature flags to lint and test, one entry per combination
+        type: string
+        default: '["--all-features"]'
+      release-tests:
+        description: Run the tests in release mode
+        type: boolean
+        default: false
+      apt-packages:
+        description: Debian packages to install before building
+        type: string
+        default: ""
+      private-deps:
+        description: Load the read-only deploy keys of nist-minutiae and nist-match
+        type: boolean
+        default: false
+      extra-test-packages:
+        description: Extra `cargo test` arguments for workspace members, e.g. "-p wsq-cli"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: inputs.apt-packages != ''
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ${{ inputs.apt-packages }}
+      # The first key must exist in every caller: an empty first entry breaks ssh-add.
+      - if: inputs.private-deps
+        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.NIST_MINUTIAE_DEPLOY_KEY }}
+            ${{ secrets.NIST_MATCH_DEPLOY_KEY }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: rust-ci # one cache for lint, test and the weekly warm-up
+      - run: cargo fmt --all --check
+      - name: Clippy, one run per feature set
+        env:
+          FEATURE_SETS: ${{ inputs.feature-sets }}
+        run: |
+          set -eu
+          echo "$FEATURE_SETS" | jq -r '.[]' | while IFS= read -r set; do
+            # shellcheck disable=SC2086
+            cargo clippy --all-targets $set -- -D warnings
+          done
+      - name: Docs, last feature set
+        env:
+          FEATURE_SETS: ${{ inputs.feature-sets }}
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          set -eu
+          # shellcheck disable=SC2046
+          cargo doc --no-deps $(echo "$FEATURE_SETS" | jq -r '.[-1]')
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ${{ fromJSON(inputs.feature-sets) }}
+    name: test (${{ matrix.features || 'default features' }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: inputs.apt-packages != ''
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ${{ inputs.apt-packages }}
+      - if: inputs.private-deps
+        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.NIST_MINUTIAE_DEPLOY_KEY }}
+            ${{ secrets.NIST_MATCH_DEPLOY_KEY }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: rust-ci # one cache for lint, test and the weekly warm-up
+      - env:
+          FEATURES: ${{ matrix.features }}
+          PROFILE: ${{ inputs.release-tests && '--release' || '' }}
+          EXTRA: ${{ inputs.extra-test-packages }}
+        run: |
+          set -eu
+          # shellcheck disable=SC2086
+          cargo test $PROFILE --all-targets $FEATURES
+          # shellcheck disable=SC2086
+          cargo test $PROFILE --doc $FEATURES
+          if [ -n "$EXTRA" ]; then
+            # shellcheck disable=SC2086
+            cargo test $PROFILE $EXTRA
+          fi
+
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: inputs.apt-packages != ''
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ${{ inputs.apt-packages }}
+      - if: inputs.private-deps
+        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.NIST_MINUTIAE_DEPLOY_KEY }}
+            ${{ secrets.NIST_MATCH_DEPLOY_KEY }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ inputs.msrv }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: rust-ci # one cache for lint, test and the weekly warm-up
+      - run: cargo check --all-features
