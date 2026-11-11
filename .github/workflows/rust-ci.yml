@@ -32,6 +32,14 @@ on:
         type: string
         default: ""
 
+    # Declared so that a caller owned by another account can pass them explicitly:
+    # `secrets: inherit` only crosses repositories of the same owner.
+    secrets:
+      NIST_MINUTIAE_DEPLOY_KEY:
+        required: false
+      NIST_MATCH_DEPLOY_KEY:
+        required: false
+
 permissions:
   contents: read
 
